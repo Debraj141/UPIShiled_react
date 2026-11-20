@@ -11,6 +11,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
+from backend.upi_security import analyze_upi_payload
 
 try:
     import cv2
@@ -379,6 +380,31 @@ def pixel_consistency(image):
         return "REVIEW", "Unusually dense or heavily edited pixel structure"
     return "PASS", "Font and pixel structure look consistent"
 
+
+def extract_qr_payload(image):
+    if cv2 is None:
+        return None
+    try:
+        rgb = np.array(image.convert("RGB"))
+        detector = cv2.QRCodeDetector()
+        _data, points, _ = detector.detectAndDecode(rgb)
+        if points is not None and isinstance(_data, str) and _data.strip():
+            return _data.strip()
+    except Exception:
+        return None
+    return None
+
+
+def find_payment_payload(text):
+    if not text:
+        return None
+    match = re.search(
+        r"(?:upi://[^\s]+|https?://[^\s]+)",
+        text,
+        re.IGNORECASE,
+    )
+    return match.group(0).rstrip(".,);]") if match else None
+
 @app.get("/health")
 def health():
     return {"status": "UPIShield backend running"}
@@ -523,9 +549,24 @@ async def analyze(file: UploadFile = File(...)):
     else:
         verdict = "REAL"
 
-    if verdict == "REAL":
+    qr_payload = extract_qr_payload(image)
+    payment_payload = qr_payload or find_payment_payload(text)
+    deep_check = analyze_upi_payload(payment_payload)
+    security_score = int(deep_check["risk_score"])
+    overall_risk_score = min(100, max(risk_score, security_score))
+
+    if deep_check["verdict"] == "DANGEROUS" or overall_risk_score >= 65:
+        verdict = "DANGEROUS"
+    elif deep_check["verdict"] == "CAUTION" or overall_risk_score >= 35 or verdict == "INCONCLUSIVE":
+        verdict = "CAUTION"
+    elif verdict == "REAL" and deep_check["verdict"] == "SAFE":
+        verdict = "SAFE"
+    else:
+        verdict = "CAUTION"
+
+    if verdict == "SAFE":
         summary = "The screenshot matches the recognized layout and passed the available forensic checks."
-    elif verdict == "SUSPICIOUS":
+    elif verdict == "DANGEROUS":
         summary = "One or more strong authenticity indicators failed. Verify the payment in the official app."
     else:
         summary = "The evidence is incomplete. Verify the payment directly in the official UPI or bank app."
@@ -536,7 +577,10 @@ async def analyze(file: UploadFile = File(...)):
         "analysis_id": analysis_id,
         "app_detected": app_detected,
         "verdict": verdict,
-        "risk_score": risk_score,
+        "risk_score": overall_risk_score,
+        "security_verdict": deep_check["verdict"],
+        "security_risk_score": security_score,
+        "reasons": deep_check["reasons"],
         "confidence": round(app_confidence / 100, 2),
         "extracted_data": details,
         "evidence": evidence,
