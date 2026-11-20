@@ -1,7 +1,7 @@
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from starlette.middleware.cors import CORSMiddleware
-from PIL import Image, ImageStat
+from PIL import Image, ImageOps, ImageStat
 import io
 import uuid
 import re
@@ -67,10 +67,6 @@ AMOUNT_RE = re.compile(
     re.IGNORECASE,
 )
 UPI_ID_RE = re.compile(r"\b(?:[a-z0-9._-]+@[a-z][a-z0-9.-]*)\b", re.IGNORECASE)
-TX_RE = re.compile(
-    r"\b(?:[0-9]{12,18}|[A-Z0-9]{12,24})\b",
-    re.IGNORECASE,
-)
 DATE_RE = re.compile(
     r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})"
     r"(?:\s*,?\s*(?:at\s*)?\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?)?",
@@ -80,22 +76,98 @@ DATE_RE = re.compile(
 
 def extract_ocr(image):
     if pytesseract is None:
-        return "", "OCR unavailable"
+        return "", "OCR unavailable", None, False
 
     try:
+        image = ImageOps.exif_transpose(image)
         if cv2 is not None:
             rgb = np.array(image.convert("RGB"))
+            longest_edge = max(rgb.shape[:2])
             scale = min(1.0, 1400 / max(rgb.shape[1], 1), 2600 / max(rgb.shape[0], 1))
+            if longest_edge < 900:
+                scale = min(1.35, 900 / max(longest_edge, 1))
             rgb = cv2.resize(rgb, (max(1, int(rgb.shape[1] * scale)), max(1, int(rgb.shape[0] * scale))))
             gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+            edges = cv2.Canny(gray, 60, 160)
+            lines = cv2.HoughLinesP(
+                edges,
+                1,
+                np.pi / 180,
+                threshold=70,
+                minLineLength=max(60, int(min(gray.shape) * 0.2)),
+                maxLineGap=20,
+            )
+            angles = []
+            if lines is not None:
+                for line in lines.reshape(-1, 4):
+                    x1, y1, x2, y2 = line
+                    angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                    if abs(angle) <= 12:
+                        angles.append(float(angle))
+
+            corrected = False
+            if angles:
+                skew = float(np.median(angles))
+                if 0.8 <= abs(skew) <= 12:
+                    height, width = gray.shape
+                    matrix = cv2.getRotationMatrix2D((width / 2, height / 2), skew, 1.0)
+                    cos_angle = abs(matrix[0, 0])
+                    sin_angle = abs(matrix[0, 1])
+                    output_width = int(height * sin_angle + width * cos_angle)
+                    output_height = int(height * cos_angle + width * sin_angle)
+                    matrix[0, 2] += output_width / 2 - width / 2
+                    matrix[1, 2] += output_height / 2 - height / 2
+                    gray = cv2.warpAffine(
+                        gray,
+                        matrix,
+                        (output_width, output_height),
+                        flags=cv2.INTER_CUBIC,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=255,
+                    )
+                    corrected = True
+
+            gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
             gray = cv2.bilateralFilter(gray, 5, 35, 35)
             prepared = Image.fromarray(gray)
         else:
             prepared = image.convert("L")
-        text = pytesseract.image_to_string(prepared, config="--psm 6")
-        return text.strip(), "OCR available"
+            corrected = False
+
+        def recognize(page_mode):
+            data = pytesseract.image_to_data(
+                prepared,
+                config=f"--oem 1 --psm {page_mode}",
+                output_type=pytesseract.Output.DICT,
+            )
+            grouped = {}
+            confidences = []
+            for index, word in enumerate(data["text"]):
+                word = word.strip()
+                if not word:
+                    continue
+                key = tuple(data[key][index] for key in ("page_num", "block_num", "par_num", "line_num"))
+                grouped.setdefault(key, []).append(word)
+                try:
+                    confidence = float(data["conf"][index])
+                    if confidence >= 0:
+                        confidences.append(confidence)
+                except (TypeError, ValueError):
+                    continue
+            text = "\n".join(" ".join(words) for words in grouped.values())
+            confidence = round(sum(confidences) / len(confidences), 1) if confidences else None
+            return text.strip(), confidence
+
+        text, confidence = recognize(6)
+        if confidence is None or confidence < 48:
+            alternate_text, alternate_confidence = recognize(11)
+            if alternate_confidence is not None and (
+                confidence is None or alternate_confidence > confidence + 4
+            ):
+                text, confidence = alternate_text, alternate_confidence
+        return text, "OCR available", confidence, corrected
     except Exception as exc:
-        return "", f"OCR unavailable: {type(exc).__name__}"
+        return "", f"OCR unavailable: {type(exc).__name__}", None, False
 
 
 def detect_app(text, image):
@@ -183,34 +255,106 @@ def timestamp_is_impossible(text):
 
 def extract_details(text):
     amount = None
+    amount_source = None
     amount_match = AMOUNT_RE.search(text)
     if amount_match:
         amount = amount_match.group(1).replace(",", "")
-    if amount is None:
-        fallback_amount = re.findall(r"(?<![A-Z0-9])(?:\d{1,3}(?:,\d{3})*(?:\.\d{1,2})|\d+(?:\.\d{1,2}))(?![A-Z0-9])", text, re.IGNORECASE)
-        if fallback_amount:
-            amount = max(fallback_amount, key=len).replace(",", "")
+        amount_source = next((line.strip() for line in text.splitlines() if amount_match.group(0) in line), amount_match.group(0))
+    else:
+        for line in text.splitlines():
+            if re.search(r"\b(?:transaction|txn|upi ref|utr|reference)\b", line, re.IGNORECASE):
+                continue
+            if DATE_RE.search(line):
+                continue
+            fallback_amount = re.search(
+                r"(?<![A-Z0-9])(?:\d{1,3}(?:,\d{3})*|\d+)\.\d{1,2}(?![A-Z0-9])",
+                line,
+                re.IGNORECASE,
+            )
+            if fallback_amount:
+                amount = fallback_amount.group(0).replace(",", "")
+                amount_source = line.strip()
+                break
 
     transaction_id = None
+    transaction_source = None
     tx_label = re.search(
-        r"(?:transaction id|txn id|upi ref(?:erence)?(?: id)?|utr(?: id)?|reference number)\s*[:\-]?\s*([A-Z0-9]{8,24})",
+        r"(?:transaction\s*(?:id|no\.?|number)|txn\s*(?:id|no\.?)|upi\s*(?:ref(?:erence)?|transaction)\s*(?:id|no\.?)?|utr(?:\s*(?:id|no\.?))?|reference\s*(?:number|no\.?))\s*[:#\-]?\s*([A-Z0-9]{8,24})",
         text,
         re.IGNORECASE,
     )
     if tx_label:
         transaction_id = tx_label.group(1).upper()
-    else:
-        candidates = TX_RE.findall(text)
-        if candidates:
-            transaction_id = max(candidates, key=len).upper()
+        transaction_source = next(
+            (line.strip() for line in text.splitlines() if tx_label.group(0) in line),
+            tx_label.group(0),
+        )
 
     timestamp, _ = parse_timestamp(text)
+    timestamp_match = DATE_RE.search(text)
+    timestamp_source = None
+    if timestamp_match:
+        timestamp_source = next(
+            (line.strip() for line in text.splitlines() if timestamp_match.group(0) in line),
+            timestamp_match.group(0),
+        )
     upi_match = UPI_ID_RE.search(text)
-    return {
+    return ({
         "amount": amount,
         "transaction_id": transaction_id,
         "timestamp": timestamp,
         "upi_id": upi_match.group(0) if upi_match else None,
+    }, {
+        "amount": amount_source,
+        "transaction_id": transaction_source,
+        "timestamp": timestamp_source,
+    })
+
+
+def build_evidence(text, details, sources, ocr_confidence, orientation_corrected):
+    status_line = next(
+        (
+            line.strip()
+            for line in text.splitlines()
+            if re.search(r"payment\s+successful|paid\s+successfully|transaction\s+successful", line, re.IGNORECASE)
+        ),
+        None,
+    )
+    evidence = [
+        {
+            "label": "Payment status",
+            "detected": status_line is not None,
+            "snippet": status_line or "No clear success message detected",
+        },
+        {
+            "label": "Amount",
+            "detected": details["amount"] is not None,
+            "snippet": sources["amount"] or "No amount found with a currency or decimal format",
+        },
+        {
+            "label": "Transaction reference",
+            "detected": details["transaction_id"] is not None,
+            "snippet": (
+                re.sub(
+                    re.escape(details["transaction_id"]),
+                    "****" + details["transaction_id"][-4:],
+                    sources["transaction_id"],
+                    flags=re.IGNORECASE,
+                )
+                if sources["transaction_id"]
+                else "No reference ID found"
+            ),
+        },
+        {
+            "label": "Timestamp",
+            "detected": details["timestamp"] is not None,
+            "snippet": sources["timestamp"] or "No date/time found",
+        },
+    ]
+    return {
+        "ocr_confidence": ocr_confidence,
+        "orientation_corrected": orientation_corrected,
+        "items": evidence,
     }
 
 
@@ -267,9 +411,16 @@ async def analyze(file: UploadFile = File(...)):
     except Exception:
         raise HTTPException(400, "Invalid image file")
 
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    text, ocr_status = extract_ocr(image)
-    details = extract_details(text)
+    image = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGB")
+    text, ocr_status, ocr_confidence, orientation_corrected = extract_ocr(image)
+    details, evidence_sources = extract_details(text)
+    evidence = build_evidence(
+        text,
+        details,
+        evidence_sources,
+        ocr_confidence,
+        orientation_corrected,
+    )
     app_detected, app_confidence = detect_app(text, image)
 
     checks = [{
@@ -387,6 +538,7 @@ async def analyze(file: UploadFile = File(...)):
         "risk_score": risk_score,
         "confidence": round(app_confidence / 100, 2),
         "extracted_data": details,
+        "evidence": evidence,
         "checks": checks,
         "summary": summary,
         "processing_ms": elapsed_ms,

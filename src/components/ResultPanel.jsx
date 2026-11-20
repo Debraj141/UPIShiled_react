@@ -10,6 +10,8 @@ export default function ResultPanel({ result, error }) {
   const danger = ["SUSPICIOUS","HIGH_RISK"].includes(verdict);
   const checks = result.checks || [];
   const extracted = result.extracted_data || {};
+  const evidence = result.evidence || {};
+  const evidenceItems = evidence.items || [];
   return <section className="panel result-panel">
     <div className="result-top"><div><span className="eyebrow">ANALYSIS REPORT</span><h2>Screenshot assessment</h2></div><span className="report-id">#{result.analysis_id ?? "NEW"}</span></div>
     <div className={`verdict-card ${danger?"verdict-danger":verdict==="INCONCLUSIVE"?"verdict-warn":"verdict-safe"}`}>
@@ -20,12 +22,19 @@ export default function ResultPanel({ result, error }) {
     <div className="score-track"><span style={{width:`${Math.min(100,Math.max(0,score))}%`}} className={danger?"score-danger":""}/></div>
     <div className="detail-grid">
       <div className="detail-item"><small>APP DETECTED</small><b>{result.app_detected || "Unknown"}</b></div>
-      <div className="detail-item"><small>CONFIDENCE</small><b>{result.confidence == null ? "Not available" : `${Math.round(Number(result.confidence)*100)}%`}</b></div>
+      <div className="detail-item"><small>LAYOUT CONFIDENCE</small><b>{result.confidence == null ? "Not available" : `${Math.round(Number(result.confidence)*100)}%`}</b></div>
       <div className="detail-item"><small>AMOUNT</small><b>{extracted.amount ? `₹${extracted.amount}` : "Not extracted"}</b></div>
       <div className="detail-item"><small>TRANSACTION ID</small><b className="mono">{extracted.transaction_id || "Not extracted"}</b></div>
       <div className="detail-item"><small>TIMESTAMP</small><b>{extracted.timestamp || "Not extracted"}</b></div>
       <div className="detail-item"><small>PROCESSING</small><b><Clock3 size={14}/> {result.processing_ms != null ? `${result.processing_ms} ms` : "Not reported"}</b></div>
     </div>
+    <div className="evidence-heading"><h3>What the scan found</h3><span>{evidence.ocr_confidence == null ? "OCR confidence unavailable" : `${Math.round(Number(evidence.ocr_confidence))}% OCR confidence`}</span></div>
+    {evidence.orientation_corrected && <p className="evidence-note">The photo was rotated to improve text reading.</p>}
+    {evidenceItems.length ? <div className="evidence-grid">{evidenceItems.map((item, i) => <div className="evidence-item" key={i}>
+      <span className={`evidence-mark ${item.detected ? "found" : "missing"}`}>{item.detected ? <CheckCircle2 size={14}/> : <AlertTriangle size={14}/>}</span>
+      <div><b>{item.label}</b><p>{item.snippet}</p></div>
+    </div>)}</div> : <p className="muted">Field-level OCR evidence is not available for this scan.</p>}
+    <p className="evidence-caveat">OCR confidence measures text readability only. It does not confirm that a payment settled.</p>
     <div className="checks-heading"><h3>Security checks</h3><span>{checks.length} checks reported</span></div>
     {checks.length ? <div className="check-list">{checks.map((check,i)=>{
       const pass = ["PASS","SAFE","OK"].includes(String(check.status).toUpperCase());
