@@ -14,7 +14,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
-COPY backend/main.py ./backend/main.py
+COPY backend/main.py backend/upi_security.py backend/upi_blocklist.json ./backend/
 COPY --from=frontend /app/dist ./dist
 EXPOSE 8000
 CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

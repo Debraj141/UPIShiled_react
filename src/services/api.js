@@ -13,7 +13,7 @@ const api = axios.create({
         ? networkBaseUrl
         : ""
   ),
-  timeout: 60000
+  timeout: 90000
 });
 
 export async function analyzeScreenshot(file) {

@@ -140,7 +140,7 @@ def extract_ocr(image):
                 prepared,
                 config=f"--oem 1 --psm {page_mode}",
                 output_type=pytesseract.Output.DICT,
-                timeout=12,
+                timeout=25,
             )
             grouped = {}
             confidences = []
@@ -160,13 +160,44 @@ def extract_ocr(image):
             confidence = round(sum(confidences) / len(confidences), 1) if confidences else None
             return text.strip(), confidence
 
-        text, confidence = recognize(6)
-        if confidence is None or confidence < 48:
-            alternate_text, alternate_confidence = recognize(11)
-            if alternate_confidence is not None and (
-                confidence is None or alternate_confidence > confidence + 4
-            ):
-                text, confidence = alternate_text, alternate_confidence
+        try:
+            text, confidence = recognize(11)
+            if confidence is None or confidence < 42:
+                alternate_text, alternate_confidence = recognize(6)
+                if alternate_confidence is not None and (
+                    confidence is None or alternate_confidence > confidence + 2
+                ):
+                    text, confidence = alternate_text, alternate_confidence
+        except Exception as exc:
+            fallback = image.convert("L").resize(
+                (
+                    max(1, min(1400, image.width)),
+                    max(1, min(2600, image.height)),
+                )
+            )
+            try:
+                data = pytesseract.image_to_data(
+                    fallback,
+                    config="--oem 1 --psm 11",
+                    output_type=pytesseract.Output.DICT,
+                    timeout=30,
+                )
+                words = []
+                confidences = []
+                for index, word in enumerate(data["text"]):
+                    word = word.strip()
+                    if word:
+                        words.append(word)
+                    try:
+                        confidence = float(data["conf"][index])
+                        if confidence >= 0:
+                            confidences.append(confidence)
+                    except (TypeError, ValueError):
+                        continue
+                text = "\n".join(words)
+                confidence = round(sum(confidences) / len(confidences), 1) if confidences else None
+            except Exception:
+                raise exc
         return text, "OCR available", confidence, corrected
     except Exception as exc:
         return "", f"OCR unavailable: {type(exc).__name__}", None, False
@@ -553,11 +584,24 @@ async def analyze(file: UploadFile = File(...)):
     payment_payload = qr_payload or find_payment_payload(text)
     deep_check = analyze_upi_payload(payment_payload)
     security_score = int(deep_check["risk_score"])
-    overall_risk_score = min(100, max(risk_score, security_score))
+    deep_reason_ids = {reason["id"] for reason in deep_check["reasons"]}
+    parsing_failed = bool(deep_reason_ids & {
+        "missing_payload",
+        "parse_failure",
+        "bad_encoding",
+        "scheme_http",
+        "scheme_unknown",
+        "scheme_collect",
+    })
 
-    if deep_check["verdict"] == "DANGEROUS" or overall_risk_score >= 65:
+    if parsing_failed:
+        overall_risk_score = security_score
+    else:
+        overall_risk_score = min(100, max(risk_score, security_score))
+
+    if deep_check["verdict"] == "DANGEROUS" and not parsing_failed:
         verdict = "DANGEROUS"
-    elif deep_check["verdict"] == "CAUTION" or overall_risk_score >= 35 or verdict == "INCONCLUSIVE":
+    elif parsing_failed or deep_check["verdict"] == "CAUTION" or overall_risk_score >= 35 or verdict == "INCONCLUSIVE":
         verdict = "CAUTION"
     elif verdict == "REAL" and deep_check["verdict"] == "SAFE":
         verdict = "SAFE"
