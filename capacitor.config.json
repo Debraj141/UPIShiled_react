@@ -1,0 +1,6 @@
+{
+  "appId": "com.upishield.app",
+  "appName": "UPIShield",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}

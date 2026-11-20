@@ -2,20 +2,17 @@
 
 This setup serves the React app and FastAPI/OCR API from one Render web service. The browser uses the same public HTTPS origin for both.
 
-## 1. Push the project to GitHub
+## 1. GitHub source
 
-Create a GitHub repository. It can be private; the deployed app will still be publicly accessible. From PowerShell in this project folder, run:
+The project is in [Debraj141/UPIShiled_react](https://github.com/Debraj141/UPIShiled_react). To publish later changes, run these commands from the project folder:
 
 ```powershell
-git init
 git add .
-git commit -m "Prepare UPIShield for Render"
-git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/YOUR-REPOSITORY.git
-git push -u origin main
+git commit -m "Describe your change"
+git push
 ```
 
-Replace the remote URL with the repository you created. Do not commit real payment screenshots or secret values.
+Do not commit real payment screenshots or secret values.
 
 ## 2. Create the Render service
 
@@ -30,3 +27,13 @@ Replace the remote URL with the repository you created. Do not commit real payme
 - History and duplicate-ID tracking are in memory and reset when the service restarts or redeploys. This is a demo deployment, not durable transaction storage.
 - The service accepts uploaded images for analysis and has no user login. Avoid uploading real or sensitive payment screenshots until authentication, abuse protection, and a retention policy are added.
 - A screenshot verdict is not proof of settlement. Verify receipt in the official bank or UPI app.
+
+## Build the Android app
+
+The Android project uses Capacitor and sends scans to the public Render API. Each push to `main` runs the **Build Android APK** GitHub Actions workflow.
+
+1. Open the repository's **Actions** tab and select the latest successful **Build Android APK** run.
+2. Download the `upishield-debug-apk` artifact and extract `app-debug.apk`.
+3. Transfer the APK to an Android phone and install it. Android may ask you to allow installation from that file source.
+
+The debug APK is for direct testing, not Google Play publishing. This project requires Android Studio and an Android SDK to build locally; GitHub Actions builds it without installing those tools on the development laptop.

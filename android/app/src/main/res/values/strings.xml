@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">UPIShield</string>
+    <string name="title_activity_main">UPIShield</string>
+    <string name="package_name">com.upishield.app</string>
+    <string name="custom_url_scheme">com.upishield.app</string>
+</resources>
