@@ -139,6 +139,7 @@ def extract_ocr(image):
                 prepared,
                 config=f"--oem 1 --psm {page_mode}",
                 output_type=pytesseract.Output.DICT,
+                timeout=12,
             )
             grouped = {}
             confidences = []

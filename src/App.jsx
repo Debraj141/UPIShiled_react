@@ -22,7 +22,12 @@ export default function App() {
       setPage("scan");
       loadHistory();
     } catch (e) {
-      setError(e.response?.data?.detail || e.message || "Unable to reach the analysis service.");
+      const isTimeout = e.code === "ECONNABORTED";
+      setError(
+        isTimeout
+          ? "Analysis took too long. Please try again with a smaller screenshot."
+          : e.response?.data?.detail || e.message || "Unable to reach the analysis service."
+      );
     } finally { setBusy(false); }
   }
   async function loadHistory() {
