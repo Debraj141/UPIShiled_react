@@ -3,5 +3,6 @@
     "fraud@paytm",
     "scam@oksbi",
     "refund@okaxis"
-  ]
+  ],
+  "reported_vpa_hashes": []
 }

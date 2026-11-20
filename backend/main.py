@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
-from backend.upi_security import analyze_upi_payload
+from backend.upi_security import analyze_upi_payload, hash_vpa, parse_upi_payload
 
 try:
     import cv2
@@ -583,6 +583,18 @@ async def analyze(file: UploadFile = File(...)):
     qr_payload = extract_qr_payload(image)
     payment_payload = qr_payload or find_payment_payload(text)
     deep_check = analyze_upi_payload(payment_payload)
+    parsed_payment = parse_upi_payload(payment_payload)
+    payment_params = parsed_payment.get("params", {}) if parsed_payment.get("ok") else {}
+    payment_vpa = str(payment_params.get("pa", "")).strip()
+    payee_name = str(payment_params.get("pn", "")).strip()
+    payment_vpa_hash = hash_vpa(payment_vpa)
+    reputation = {
+        "vpa_hash": payment_vpa_hash,
+        "blocklisted": any(
+            reason["id"] == "blocklisted_vpa"
+            for reason in deep_check["reasons"]
+        ),
+    }
     security_score = int(deep_check["risk_score"])
     deep_reason_ids = {reason["id"] for reason in deep_check["reasons"]}
     parsing_failed = bool(deep_reason_ids & {
@@ -625,6 +637,8 @@ async def analyze(file: UploadFile = File(...)):
         "security_verdict": deep_check["verdict"],
         "security_risk_score": security_score,
         "reasons": deep_check["reasons"],
+        "reputation": reputation,
+        "payee_name": payee_name or None,
         "confidence": round(app_confidence / 100, 2),
         "extracted_data": details,
         "evidence": evidence,
